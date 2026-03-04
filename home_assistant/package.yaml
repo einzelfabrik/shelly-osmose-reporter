@@ -1,0 +1,115 @@
+template:
+  - sensor:
+      - name: "Osmose Produktwasser Gesamt"
+        unique_id: osmose_produktwasser_gesamt
+        unit_of_measurement: "L"
+        state_class: total_increasing
+        device_class: water
+        state: >
+          {{ [states('sensor.osmose_zulauf_gesamt')|float(0) - states('sensor.osmose_abwasser_gesamt')|float(0), 0] | max | round(2) }}
+
+sensor:
+  - platform: rest
+    name: "Osmose Zulauf Gesamt"
+    unique_id: osmose_zulauf_gesamt
+    resource: "http://SHELLY_ZULAUF_IP/rpc/Input.GetStatus?id=2"
+    value_template: "{{ value_json.counts.xtotal | default(0) }}"
+    unit_of_measurement: "L"
+    device_class: water
+    state_class: total_increasing
+    scan_interval: 300
+  - platform: rest
+    name: "Osmose Abwasser Gesamt"
+    unique_id: osmose_abwasser_gesamt
+    resource: "http://SHELLY_ABWASSER_IP/rpc/Input.GetStatus?id=2"
+    value_template: "{{ value_json.counts.xtotal | default(0) }}"
+    unit_of_measurement: "L"
+    device_class: water
+    state_class: total_increasing
+    scan_interval: 300
+
+utility_meter:
+  osmose_zulauf_tag:
+    source: sensor.osmose_zulauf_gesamt
+    cycle: daily
+  osmose_abwasser_tag:
+    source: sensor.osmose_abwasser_gesamt
+    cycle: daily
+  osmose_produktwasser_tag:
+    source: sensor.osmose_produktwasser_gesamt
+    cycle: daily
+
+  osmose_zulauf_woche:
+    source: sensor.osmose_zulauf_gesamt
+    cycle: weekly
+  osmose_abwasser_woche:
+    source: sensor.osmose_abwasser_gesamt
+    cycle: weekly
+  osmose_produktwasser_woche:
+    source: sensor.osmose_produktwasser_gesamt
+    cycle: weekly
+
+  osmose_zulauf_monat:
+    source: sensor.osmose_zulauf_gesamt
+    cycle: monthly
+  osmose_abwasser_monat:
+    source: sensor.osmose_abwasser_gesamt
+    cycle: monthly
+  osmose_produktwasser_monat:
+    source: sensor.osmose_produktwasser_gesamt
+    cycle: monthly
+
+automation:
+  - alias: "Osmose Report 06:00"
+    id: osmose_report_0600
+    trigger:
+      - platform: time
+        at: "06:00:00"
+    action:
+      - variables:
+          yesterday: "{{ (now() - timedelta(days=1)).strftime('%Y-%m-%d') }}"
+          monday: "{{ now().weekday() == 0 }}"
+          month_start: "{{ now().day == 1 }}"
+          day_in: "{{ states('sensor.osmose_zulauf_tag')|float(0) }}"
+          day_out: "{{ states('sensor.osmose_abwasser_tag')|float(0) }}"
+          day_prod: "{{ states('sensor.osmose_produktwasser_tag')|float(0) }}"
+          day_yield: "{{ (100 * day_prod / day_in) if day_in > 0 else 0 }}"
+          w_in: "{{ states('sensor.osmose_zulauf_woche')|float(0) }}"
+          w_out: "{{ states('sensor.osmose_abwasser_woche')|float(0) }}"
+          w_prod: "{{ states('sensor.osmose_produktwasser_woche')|float(0) }}"
+          w_yield: "{{ (100 * w_prod / w_in) if w_in > 0 else 0 }}"
+          m_in: "{{ states('sensor.osmose_zulauf_monat')|float(0) }}"
+          m_out: "{{ states('sensor.osmose_abwasser_monat')|float(0) }}"
+          m_prod: "{{ states('sensor.osmose_produktwasser_monat')|float(0) }}"
+          m_yield: "{{ (100 * m_prod / m_in) if m_in > 0 else 0 }}"
+          msg: >-
+            💧 *Osmose Report*\n
+            🕒 Erstellt: {{ now().strftime('%Y-%m-%d %H:%M') }}\n\n
+            📅 *Gestern* ({{ yesterday }})\n
+            ```\n
+            Zulauf        {{ '%.2f'|format(day_in) }} L\n
+            Abwasser      {{ '%.2f'|format(day_out) }} L\n
+            Produktwasser {{ '%.2f'|format(day_prod) }} L\n
+            Ausbeute      {{ '%.2f'|format(day_yield) }} %\n
+            ```\n
+            {% if monday %}\n
+            📆 *Letzte Woche*\n
+            ```\n
+            Zulauf        {{ '%.2f'|format(w_in) }} L\n
+            Abwasser      {{ '%.2f'|format(w_out) }} L\n
+            Produktwasser {{ '%.2f'|format(w_prod) }} L\n
+            Ausbeute      {{ '%.2f'|format(w_yield) }} %\n
+            ```\n
+            {% endif %}\n
+            {% if month_start %}\n
+            🗓️ *Letzter Monat*\n
+            ```\n
+            Zulauf        {{ '%.2f'|format(m_in) }} L\n
+            Abwasser      {{ '%.2f'|format(m_out) }} L\n
+            Produktwasser {{ '%.2f'|format(m_prod) }} L\n
+            Ausbeute      {{ '%.2f'|format(m_yield) }} %\n
+            ```\n
+            {% endif %}
+      - service: notify.notify
+        data:
+          message: "{{ msg }}"

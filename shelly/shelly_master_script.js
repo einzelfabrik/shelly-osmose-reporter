@@ -1,0 +1,715 @@
+/**
+ * Shelly Plus Uni Master Script (Zulauf-Geraet)
+ * - Liest Zulauf lokal (input:2)
+ * - Liest Ablauf remote (zweiter Shelly)
+ * - Berechnet Trinkwasser = Zulauf - Ablauf
+ * - Fuehrt Tages-/Wochen-/Monatswerte (ohne Counter-Reset)
+ * - Sendet taeglich WhatsApp Report ueber WAHA
+ *
+ * Hinweis:
+ * - xcounts auf BEIDEN Shellys auf x/1380 setzen (FL-S402B: F=23*Q(L/min)).
+ * - Keine echten Virtual Components auf Plus Uni: Wert ist Script-intern.
+ */
+
+let CFG = {
+  inputId: 2,
+  remoteAblaufStatusUrl: "http://SHELLY_ABWASSER_IP/rpc/Input.GetStatus?id=2",
+  tickSeconds: 3600,
+  dailySendTime: "06:00",
+  sendTestOnStart: false, // true => sendet beim Script-Start sofort einen Testreport
+  remoteOfflineFailThreshold: 2, // ab wie vielen Fehlern "offline" gesetzt wird
+
+  // WAHA
+  wahaUrl: "https://your-waha.example.com/api/sendText",
+  wahaApiKey: "CHANGE_ME",
+  waChatId: "CHANGE_ME@g.us",
+  waSession: "default",
+  waRetries: 3,
+  waRetryBaseSec: 2,
+};
+
+let state = {
+  // totals in liters
+  inTotal: 0,
+  outTotal: 0,
+  drinkTotal: 0,
+
+  // anchors
+  dayKey: "",
+  dayInStart: 0,
+  dayOutStart: 0,
+  weekKey: "",
+  weekInStart: 0,
+  weekOutStart: 0,
+  monthKey: "",
+  monthInStart: 0,
+  monthOutStart: 0,
+
+  // rollover snapshot
+  yIn: 0,
+  yOut: 0,
+  yDrink: 0,
+  yKey: "",
+  lwIn: 0,
+  lwOut: 0,
+  lwDrink: 0,
+  lwKey: "",
+  lmIn: 0,
+  lmOut: 0,
+  lmDrink: 0,
+  lmKey: "",
+
+  // last known totals
+  lastIn: 0,
+  lastOut: 0,
+
+  // report de-duplication
+  lastReportDay: "",
+  remoteFailCount: 0,
+  remoteOffline: false,
+
+  initialized: false,
+};
+
+let busy = false;
+
+function z(n) {
+  return n < 10 ? "0" + n : "" + n;
+}
+
+function round3(v) {
+  return Math.round(v * 1000) / 1000;
+}
+
+function asLitersFromStatus(st) {
+  if (!st || !st.counts) return 0;
+  if (typeof st.counts.xtotal === "number") return st.counts.xtotal;
+  if (typeof st.counts.total === "number") return st.counts.total / 1380.0;
+  return 0;
+}
+
+function safeLitersFromStatus(st, sourceLabel) {
+  try {
+    return asLitersFromStatus(st);
+  } catch (e) {
+    print("parse liters error (" + sourceLabel + ")");
+    return 0;
+  }
+}
+
+function dayKeyNow(d) {
+  return d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate());
+}
+
+function monthKeyNow(d) {
+  return d.getFullYear() + "-" + z(d.getMonth() + 1);
+}
+
+function isLeapYear(y) {
+  if (y % 4 !== 0) return false;
+  if (y % 100 !== 0) return true;
+  return y % 400 === 0;
+}
+
+function dayOfYear(d) {
+  let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  let y = d.getFullYear();
+  if (isLeapYear(y)) mdays[1] = 29;
+  let m = d.getMonth();
+  let sum = 0;
+  let i = 0;
+  while (i < m) {
+    sum += mdays[i];
+    i++;
+  }
+  return sum + d.getDate();
+}
+
+// ISO week key: YYYY-Www (ohne Date-Setter, kompatibel mit Shelly mJS)
+function weekKeyNow(d) {
+  let y = d.getFullYear();
+  let doy = dayOfYear(d);
+  let isoWeekday = ((d.getDay() + 6) % 7) + 1; // Mon=1..Sun=7
+  let week = Math.floor((doy - isoWeekday + 10) / 7);
+
+  function weeksInIsoYear(year) {
+    let jan1 = new Date(year, 0, 1);
+    let jan1Iso = ((jan1.getDay() + 6) % 7) + 1;
+    if (jan1Iso === 4) return 53; // Donnerstag
+    if (jan1Iso === 3 && isLeapYear(year)) return 53; // Schaltjahr + Mittwoch
+    return 52;
+  }
+
+  if (week < 1) {
+    y = y - 1;
+    week = weeksInIsoYear(y);
+  } else {
+    let maxWeek = weeksInIsoYear(y);
+    if (week > maxWeek) {
+      y = y + 1;
+      week = 1;
+    }
+  }
+
+  return y + "-W" + z(week);
+}
+
+function todayHm(d) {
+  return z(d.getHours()) + ":" + z(d.getMinutes());
+}
+
+function clampDrink(inL, outL) {
+  let v = inL - outL;
+  return v < 0 ? 0 : v;
+}
+
+function fmtL(v) {
+  return round3(v) + " L";
+}
+
+function fmtPct(v) {
+  return round3(v) + " %";
+}
+
+function fmtFixed(v, decimals) {
+  let m = 1;
+  let i = 0;
+  while (i < decimals) {
+    m *= 10;
+    i++;
+  }
+  let n = Math.round(v * m) / m;
+  let s = "" + n;
+  let dot = s.indexOf(".");
+  if (dot < 0) {
+    s += ".";
+    dot = s.length - 1;
+  }
+  let fracLen = s.length - dot - 1;
+  while (fracLen < decimals) {
+    s += "0";
+    fracLen++;
+  }
+  return s;
+}
+
+function fmtL2(v) {
+  return fmtFixed(v, 2) + " L";
+}
+
+function fmtPct2(v) {
+  return fmtFixed(v, 2) + " %";
+}
+
+function padRight(text, width) {
+  let s = text;
+  while (s.length < width) s += " ";
+  return s;
+}
+
+function tableRow(label, value) {
+  return padRight(label, 14) + value;
+}
+
+function kvsSet(key, value, cb) {
+  Shelly.call("KVS.Set", { key: key, value: value }, function (res, ec, em) {
+    if (ec !== 0) print("KVS.Set error", key, ec, em);
+    if (cb) cb();
+  });
+}
+
+function kvsGet(key, cb) {
+  Shelly.call("KVS.Get", { key: key }, function (res, ec, em) {
+    if (ec !== 0) {
+      cb(null);
+      return;
+    }
+    cb(res && res.value !== undefined ? res.value : null);
+  });
+}
+
+function saveState(cb) {
+  // Plus Uni erlaubt max. 255 Zeichen pro KVS-Wert -> in mehrere Keys splitten.
+  let s1 = JSON.stringify({
+    i: round3(state.inTotal),
+    o: round3(state.outTotal),
+    t: round3(state.drinkTotal),
+    li: round3(state.lastIn),
+    lo: round3(state.lastOut),
+  });
+  let s2 = JSON.stringify({
+    dk: state.dayKey,
+    dis: round3(state.dayInStart),
+    dos: round3(state.dayOutStart),
+    wk: state.weekKey,
+    wis: round3(state.weekInStart),
+    wos: round3(state.weekOutStart),
+    mk: state.monthKey,
+    mis: round3(state.monthInStart),
+    mos: round3(state.monthOutStart),
+  });
+  let s3 = JSON.stringify({
+    yi: round3(state.yIn),
+    yo: round3(state.yOut),
+    yt: round3(state.yDrink),
+    yk: state.yKey,
+    lrd: state.lastReportDay,
+    rfc: state.remoteFailCount,
+    rof: state.remoteOffline ? 1 : 0,
+  });
+  let s4 = JSON.stringify({
+    lwi: round3(state.lwIn),
+    lwo: round3(state.lwOut),
+    lwt: round3(state.lwDrink),
+    lwk: state.lwKey,
+    lmi: round3(state.lmIn),
+    lmo: round3(state.lmOut),
+    lmt: round3(state.lmDrink),
+    lmk: state.lmKey,
+  });
+
+  kvsSet("osm.s1", s1, function () {
+    kvsSet("osm.s2", s2, function () {
+      kvsSet("osm.s3", s3, function () {
+        kvsSet("osm.s4", s4, cb);
+      });
+    });
+  });
+}
+
+function loadState(cb) {
+  function parseJsonOrEmpty(val) {
+    if (typeof val !== "string" || val === "") return {};
+    try {
+      return JSON.parse(val);
+    } catch (e) {
+      return {};
+    }
+  }
+
+  kvsGet("osm.s1", function (v1) {
+    kvsGet("osm.s2", function (v2) {
+      kvsGet("osm.s3", function (v3) {
+        kvsGet("osm.s4", function (v4) {
+          let o1 = parseJsonOrEmpty(v1);
+          let o2 = parseJsonOrEmpty(v2);
+          let o3 = parseJsonOrEmpty(v3);
+          let o4 = parseJsonOrEmpty(v4);
+
+          state.inTotal = o1.i || 0;
+          state.outTotal = o1.o || 0;
+          state.drinkTotal = o1.t || 0;
+          state.lastIn = o1.li || 0;
+          state.lastOut = o1.lo || 0;
+
+          state.dayKey = o2.dk || "";
+          state.dayInStart = o2.dis || 0;
+          state.dayOutStart = o2.dos || 0;
+          state.weekKey = o2.wk || "";
+          state.weekInStart = o2.wis || 0;
+          state.weekOutStart = o2.wos || 0;
+          state.monthKey = o2.mk || "";
+          state.monthInStart = o2.mis || 0;
+          state.monthOutStart = o2.mos || 0;
+
+          state.yIn = o3.yi || 0;
+          state.yOut = o3.yo || 0;
+          state.yDrink = o3.yt || 0;
+          state.yKey = o3.yk || "";
+          state.lastReportDay = o3.lrd || "";
+          state.remoteFailCount = o3.rfc || 0;
+          state.remoteOffline = (o3.rof || 0) === 1;
+
+          state.lwIn = o4.lwi || 0;
+          state.lwOut = o4.lwo || 0;
+          state.lwDrink = o4.lwt || 0;
+          state.lwKey = o4.lwk || "";
+          state.lmIn = o4.lmi || 0;
+          state.lmOut = o4.lmo || 0;
+          state.lmDrink = o4.lmt || 0;
+          state.lmKey = o4.lmk || "";
+          cb();
+        });
+      });
+    });
+  });
+}
+
+function fetchLocalIn(cb) {
+  Shelly.call("Input.GetStatus", { id: CFG.inputId }, function (res, ec, em) {
+    if (ec !== 0) {
+      cb("local Input.GetStatus failed: " + em, 0);
+      return;
+    }
+    cb(null, safeLitersFromStatus(res, "local"));
+  });
+}
+
+function parseRemoteBody(result) {
+  if (!result) return null;
+  if (typeof result.body === "string" && result.body !== "") {
+    try {
+      return JSON.parse(result.body);
+    } catch (e) {
+      return null;
+    }
+  }
+  if (result.body && typeof result.body === "object") return result.body;
+  return null;
+}
+
+function fetchRemoteOut(cb) {
+  Shelly.call(
+    "HTTP.Request",
+    {
+      method: "GET",
+      url: CFG.remoteAblaufStatusUrl,
+      timeout: 10,
+      ssl_ca: "*",
+    },
+    function (res, ec, em) {
+      if (ec !== 0) {
+        cb("remote HTTP failed: " + em, state.lastOut || 0);
+        return;
+      }
+      let code = (res && res.code) || 0;
+      if (code < 200 || code >= 300) {
+        cb("remote HTTP status " + code, state.lastOut || 0);
+        return;
+      }
+      let body = parseRemoteBody(res);
+      if (!body) {
+        cb("remote JSON parse failed", state.lastOut || 0);
+        return;
+      }
+      cb(null, safeLitersFromStatus(body, "remote"));
+    }
+  );
+}
+
+function sendWaReport(text, attempt) {
+  Shelly.call(
+    "HTTP.Request",
+    {
+      method: "POST",
+      url: CFG.wahaUrl,
+      timeout: 15,
+      ssl_ca: "*",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Api-Key": CFG.wahaApiKey,
+      },
+      body: JSON.stringify({
+        chatId: CFG.waChatId,
+        text: text,
+        session: CFG.waSession,
+      }),
+    },
+    function (res, ec, em) {
+      if (ec === 0 && res && res.code >= 200 && res.code < 300) {
+        print("WAHA report sent.");
+        return;
+      }
+
+      if (attempt < CFG.waRetries) {
+        let waitMs = CFG.waRetryBaseSec * attempt * 1000;
+        print("WAHA retry", attempt + 1, "in", waitMs, "ms");
+        Timer.set(waitMs, false, function () {
+          sendWaReport(text, attempt + 1);
+        });
+      } else {
+        print("WAHA send failed:", ec, em, res ? res.code : "no-code");
+      }
+    }
+  );
+}
+
+function markRemoteHealth(errOut) {
+  if (errOut) {
+    state.remoteFailCount = state.remoteFailCount + 1;
+    if (state.remoteFailCount >= CFG.remoteOfflineFailThreshold) {
+      state.remoteOffline = true;
+    }
+    return;
+  }
+  state.remoteFailCount = 0;
+  state.remoteOffline = false;
+}
+
+function buildScheduledReport(now) {
+  let dayEff = state.yIn > 0 ? (state.yDrink / state.yIn) * 100.0 : 0.0;
+  let includeLastWeek = now.getDay() === 1 && !!state.lwKey; // Montag
+  let includeLastMonth = now.getDate() === 1 && !!state.lmKey; // Monatserster
+  let codeFence = "```";
+
+  let txt =
+    "💧 *Osmose Report*\n" +
+    "🕒 Erstellt: " +
+    dayKeyNow(now) +
+    " " +
+    todayHm(now) +
+    "\n\n" +
+    "📅 *Gestern* (" +
+    state.yKey +
+    ")\n" +
+    codeFence +
+    "\n" +
+    tableRow("Zulauf", fmtL2(state.yIn)) +
+    "\n" +
+    tableRow("Abwasser", fmtL2(state.yOut)) +
+    "\n" +
+    tableRow("Produktwasser", fmtL2(state.yDrink)) +
+    "\n" +
+    tableRow("Ausbeute", fmtPct2(dayEff)) +
+    "\n" +
+    codeFence;
+
+  if (includeLastWeek) {
+    let weekEff = state.lwIn > 0 ? (state.lwDrink / state.lwIn) * 100.0 : 0.0;
+    txt +=
+      "\n\n" +
+      "📆 *Letzte Woche* (" +
+      state.lwKey +
+      ")\n" +
+      codeFence +
+      "\n" +
+      tableRow("Zulauf", fmtL2(state.lwIn)) +
+      "\n" +
+      tableRow("Abwasser", fmtL2(state.lwOut)) +
+      "\n" +
+      tableRow("Produktwasser", fmtL2(state.lwDrink)) +
+      "\n" +
+      tableRow("Ausbeute", fmtPct2(weekEff)) +
+      "\n" +
+      codeFence;
+  }
+
+  if (includeLastMonth) {
+    let monthEff = state.lmIn > 0 ? (state.lmDrink / state.lmIn) * 100.0 : 0.0;
+    txt +=
+      "\n\n" +
+      "🗓️ *Letzter Monat* (" +
+      state.lmKey +
+      ")\n" +
+      codeFence +
+      "\n" +
+      tableRow("Zulauf", fmtL2(state.lmIn)) +
+      "\n" +
+      tableRow("Abwasser", fmtL2(state.lmOut)) +
+      "\n" +
+      tableRow("Produktwasser", fmtL2(state.lmDrink)) +
+      "\n" +
+      tableRow("Ausbeute", fmtPct2(monthEff)) +
+      "\n" +
+      codeFence;
+  }
+
+  if (state.remoteOffline) {
+    txt +=
+      "\n\n" +
+      "⚠️ *Hinweis*\n" +
+      "Ablauf-Shelly ist derzeit nicht erreichbar.\n" +
+      "Der Ablaufwert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
+  }
+
+  return txt;
+}
+
+function buildTestReport(now) {
+  let dayIn = state.inTotal - state.dayInStart;
+  let dayOut = state.outTotal - state.dayOutStart;
+  if (dayIn < 0) dayIn = 0;
+  if (dayOut < 0) dayOut = 0;
+  let dayDrink = clampDrink(dayIn, dayOut);
+  let dayEff = dayIn > 0 ? (dayDrink / dayIn) * 100.0 : 0.0;
+  let totalEff = state.inTotal > 0 ? (state.drinkTotal / state.inTotal) * 100.0 : 0.0;
+  let codeFence = "```";
+
+  return (
+    "🧪 *TEST Osmose Report*\n" +
+    "🕒 Erstellt: " +
+    dayKeyNow(now) +
+    " " +
+    todayHm(now) +
+    "\n\n" +
+    "📍 *Heute bisher*\n" +
+    codeFence +
+    "\n" +
+    tableRow("Zulauf", fmtL2(dayIn)) +
+    "\n" +
+    tableRow("Abwasser", fmtL2(dayOut)) +
+    "\n" +
+    tableRow("Produktwasser", fmtL2(dayDrink)) +
+    "\n" +
+    tableRow("Ausbeute", fmtPct2(dayEff)) +
+    "\n" +
+    codeFence +
+    "\n\n" +
+    "🏁 *Gesamt seit Start*\n" +
+    codeFence +
+    "\n" +
+    tableRow("Zulauf", fmtL2(state.inTotal)) +
+    "\n" +
+    tableRow("Abwasser", fmtL2(state.outTotal)) +
+    "\n" +
+    tableRow("Produktwasser", fmtL2(state.drinkTotal)) +
+    "\n" +
+    tableRow("Ausbeute", fmtPct2(totalEff)) +
+    "\n" +
+    codeFence +
+    (state.remoteOffline
+      ? "\n\n⚠️ *Hinweis*\nAblauf-Shelly ist derzeit nicht erreichbar."
+      : "")
+  );
+}
+
+function processPeriods(now) {
+  let dKey = dayKeyNow(now);
+  let wKey = weekKeyNow(now);
+  let mKey = monthKeyNow(now);
+
+  if (!state.initialized) {
+    state.dayKey = dKey;
+    state.dayInStart = state.inTotal;
+    state.dayOutStart = state.outTotal;
+    state.weekKey = wKey;
+    state.weekInStart = state.inTotal;
+    state.weekOutStart = state.outTotal;
+    state.monthKey = mKey;
+    state.monthInStart = state.inTotal;
+    state.monthOutStart = state.outTotal;
+    state.lastIn = state.inTotal;
+    state.lastOut = state.outTotal;
+    state.initialized = true;
+    return;
+  }
+
+  // Tageswechsel: Vortag abschliessen mit den letzten bekannten Totals.
+  if (state.dayKey !== dKey) {
+    state.yIn = state.lastIn - state.dayInStart;
+    state.yOut = state.lastOut - state.dayOutStart;
+    if (state.yIn < 0) state.yIn = 0;
+    if (state.yOut < 0) state.yOut = 0;
+    state.yDrink = clampDrink(state.yIn, state.yOut);
+    state.yKey = state.dayKey;
+
+    state.dayKey = dKey;
+    state.dayInStart = state.inTotal;
+    state.dayOutStart = state.outTotal;
+  }
+
+  if (state.weekKey !== wKey) {
+    let prevWeekIn = state.lastIn - state.weekInStart;
+    let prevWeekOut = state.lastOut - state.weekOutStart;
+    if (prevWeekIn < 0) prevWeekIn = 0;
+    if (prevWeekOut < 0) prevWeekOut = 0;
+    state.lwIn = prevWeekIn;
+    state.lwOut = prevWeekOut;
+    state.lwDrink = clampDrink(prevWeekIn, prevWeekOut);
+    state.lwKey = state.weekKey;
+
+    state.weekKey = wKey;
+    state.weekInStart = state.inTotal;
+    state.weekOutStart = state.outTotal;
+  }
+
+  if (state.monthKey !== mKey) {
+    let prevMonthIn = state.lastIn - state.monthInStart;
+    let prevMonthOut = state.lastOut - state.monthOutStart;
+    if (prevMonthIn < 0) prevMonthIn = 0;
+    if (prevMonthOut < 0) prevMonthOut = 0;
+    state.lmIn = prevMonthIn;
+    state.lmOut = prevMonthOut;
+    state.lmDrink = clampDrink(prevMonthIn, prevMonthOut);
+    state.lmKey = state.monthKey;
+
+    state.monthKey = mKey;
+    state.monthInStart = state.inTotal;
+    state.monthOutStart = state.outTotal;
+  }
+}
+
+function maybeSendDaily(now) {
+  let hm = todayHm(now);
+  let dKey = dayKeyNow(now);
+  if (hm !== CFG.dailySendTime) return;
+  if (state.lastReportDay === dKey) return; // heute schon gesendet
+  if (!state.yKey) return; // noch kein Vortag vorhanden
+
+  let text = buildScheduledReport(now);
+  sendWaReport(text, 1);
+  state.lastReportDay = dKey;
+}
+
+function doTick(doneCb) {
+  if (busy) return;
+  busy = true;
+
+  fetchLocalIn(function (errIn, inL) {
+    if (errIn) {
+      print(errIn);
+      busy = false;
+      return;
+    }
+
+    fetchRemoteOut(function (errOut, outL) {
+      if (errOut) print(errOut);
+      markRemoteHealth(errOut);
+
+      state.inTotal = round3(inL);
+      state.outTotal = round3(outL);
+      state.drinkTotal = round3(clampDrink(state.inTotal, state.outTotal));
+
+      let now = new Date();
+      processPeriods(now);
+      maybeSendDaily(now);
+
+      state.lastIn = state.inTotal;
+      state.lastOut = state.outTotal;
+
+      saveState(function () {
+        print(
+          "in=" +
+            state.inTotal +
+            "L out=" +
+            state.outTotal +
+            "L drink=" +
+            state.drinkTotal +
+            "L y=" +
+            state.yDrink +
+            "L remoteOffline=" +
+            (state.remoteOffline ? "yes" : "no")
+        );
+        busy = false;
+        if (doneCb) doneCb();
+      });
+    });
+  });
+}
+
+function validateConfig() {
+  if (CFG.wahaApiKey === "CHANGE_ME") {
+    print("WARN: Bitte CFG.wahaApiKey setzen.");
+  }
+}
+
+function start() {
+  validateConfig();
+  loadState(function () {
+    // Direkt einmal rechnen und danach zyklisch.
+    doTick(function () {
+      if (CFG.sendTestOnStart) {
+        let now = new Date();
+        let testText = buildTestReport(now);
+        sendWaReport(testText, 1);
+        print("Test report triggered on start.");
+      }
+    });
+    Timer.set(CFG.tickSeconds * 1000, true, doTick);
+    print("Master script started.");
+  });
+}
+
+start();
+

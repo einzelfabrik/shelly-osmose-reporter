@@ -1,0 +1,43 @@
+[shelly]
+zulauf_base_url = "http://SHELLY_ZULAUF_IP"
+ablauf_base_url = "http://SHELLY_ABWASSER_IP"
+input_id = 2
+request_timeout_seconds = 8
+
+[sensor]
+pulses_per_liter = 1380
+
+[runtime]
+state_file = "data/osmose_state.json"
+tick_seconds = 3600
+daily_send_time = "06:00"
+http_host = "127.0.0.1"
+http_port = 8181
+
+[notifications.channels.waha]
+enabled = true
+base_url = "https://your-waha.example.com/api"
+api_key = "CHANGE_ME"
+chat_id = "CHANGE_ME@g.us"
+session = "default"
+endpoint = "/sendText"
+timeout_seconds = 10
+retries = 3
+retry_delay_seconds = 2
+
+[notifications.channels.telegram]
+enabled = false
+bot_token = "CHANGE_ME"
+chat_id = "CHANGE_ME"
+timeout_seconds = 10
+
+[notifications.channels.email]
+enabled = false
+smtp_host = "smtp.example.com"
+smtp_port = 587
+username = "CHANGE_ME"
+password = "CHANGE_ME"
+sender = "osmose@example.com"
+recipients = ["you@example.com"]
+use_tls = true
+subject_prefix = "[Osmose]"

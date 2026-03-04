@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# Local/private runtime files
+config.ini
+config.toml
+osmose_state.json
+data/
+
+# Optional local assets
+*.webp
