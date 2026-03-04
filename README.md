@@ -2,6 +2,9 @@
 
 Open-source toolkit for RO/osmosis monitoring with Shelly Plus Uni and DIGTEN/FL-S402B sensors.
 
+German setup guide: `docs/anleitung_de.md`
+German quickstart: `docs/quickstart_de.md`
+
 It supports three runtime targets:
 
 1. **Shelly-only** (master script on Zulauf Shelly)
@@ -31,6 +34,8 @@ And three notification channels:
 - `home_assistant/package.yaml` - HA sensors + utility meters + daily automation
 - `examples/config.example.toml` - multi-channel Python config template
 - `docs/schaltplan.md` - wiring/schematic and setup notes
+- `docs/anleitung_de.md` - complete German step-by-step guide
+- `docs/quickstart_de.md` - German 5-minute quickstart
 - `config_example.ini` - legacy INI example (kept for backwards compatibility)
 
 ## Quick Start
