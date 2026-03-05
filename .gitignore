@@ -6,6 +6,8 @@ config.ini
 config.toml
 osmose_state.json
 data/
+shelly_master_script.local.js
+shelly/shelly_master_script.local.js
 
 # Optional local assets
 *.webp

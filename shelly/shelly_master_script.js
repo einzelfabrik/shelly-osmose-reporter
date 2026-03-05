@@ -14,9 +14,10 @@
 let CFG = {
   inputId: 2,
   remoteAblaufStatusUrl: "http://SHELLY_ABWASSER_IP/rpc/Input.GetStatus?id=2",
-  tickSeconds: 3600,
-  dailySendTime: "06:00",
+  tickSeconds: 1800,
+  dailySendHour: 6,
   sendTestOnStart: false, // true => sendet beim Script-Start sofort einen Testreport
+  sendDailyReportTestOnStart: false, // true => sendet einmal Chart + Tagesbericht (wie morgens) zum Testen
   remoteOfflineFailThreshold: 2, // ab wie vielen Fehlern "offline" gesetzt wird
 
   // WAHA
@@ -67,6 +68,10 @@ let state = {
   lastReportDay: "",
   remoteFailCount: 0,
   remoteOffline: false,
+
+  // 30-Min-Slots Produktwasser deltas (integers, 1/10 Liter), 48 Slots/Tag
+  todayHourly: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  yHourly:     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
 
   initialized: false,
 };
@@ -268,10 +273,17 @@ function saveState(cb) {
     lmk: state.lmKey,
   });
 
+  let s5 = JSON.stringify(state.todayHourly);
+  let s6 = JSON.stringify(state.yHourly);
+
   kvsSet("osm.s1", s1, function () {
     kvsSet("osm.s2", s2, function () {
       kvsSet("osm.s3", s3, function () {
-        kvsSet("osm.s4", s4, cb);
+        kvsSet("osm.s4", s4, function () {
+          kvsSet("osm.s5", s5, function () {
+            kvsSet("osm.s6", s6, cb);
+          });
+        });
       });
     });
   });
@@ -291,44 +303,59 @@ function loadState(cb) {
     kvsGet("osm.s2", function (v2) {
       kvsGet("osm.s3", function (v3) {
         kvsGet("osm.s4", function (v4) {
-          let o1 = parseJsonOrEmpty(v1);
-          let o2 = parseJsonOrEmpty(v2);
-          let o3 = parseJsonOrEmpty(v3);
-          let o4 = parseJsonOrEmpty(v4);
+          kvsGet("osm.s5", function (v5) {
+            kvsGet("osm.s6", function (v6) {
+              let o1 = parseJsonOrEmpty(v1);
+              let o2 = parseJsonOrEmpty(v2);
+              let o3 = parseJsonOrEmpty(v3);
+              let o4 = parseJsonOrEmpty(v4);
 
-          state.inTotal = o1.i || 0;
-          state.outTotal = o1.o || 0;
-          state.drinkTotal = o1.t || 0;
-          state.lastIn = o1.li || 0;
-          state.lastOut = o1.lo || 0;
+              state.inTotal = o1.i || 0;
+              state.outTotal = o1.o || 0;
+              state.drinkTotal = o1.t || 0;
+              state.lastIn = o1.li || 0;
+              state.lastOut = o1.lo || 0;
 
-          state.dayKey = o2.dk || "";
-          state.dayInStart = o2.dis || 0;
-          state.dayOutStart = o2.dos || 0;
-          state.weekKey = o2.wk || "";
-          state.weekInStart = o2.wis || 0;
-          state.weekOutStart = o2.wos || 0;
-          state.monthKey = o2.mk || "";
-          state.monthInStart = o2.mis || 0;
-          state.monthOutStart = o2.mos || 0;
+              state.dayKey = o2.dk || "";
+              state.dayInStart = o2.dis || 0;
+              state.dayOutStart = o2.dos || 0;
+              state.weekKey = o2.wk || "";
+              state.weekInStart = o2.wis || 0;
+              state.weekOutStart = o2.wos || 0;
+              state.monthKey = o2.mk || "";
+              state.monthInStart = o2.mis || 0;
+              state.monthOutStart = o2.mos || 0;
 
-          state.yIn = o3.yi || 0;
-          state.yOut = o3.yo || 0;
-          state.yDrink = o3.yt || 0;
-          state.yKey = o3.yk || "";
-          state.lastReportDay = o3.lrd || "";
-          state.remoteFailCount = o3.rfc || 0;
-          state.remoteOffline = (o3.rof || 0) === 1;
+              state.yIn = o3.yi || 0;
+              state.yOut = o3.yo || 0;
+              state.yDrink = o3.yt || 0;
+              state.yKey = o3.yk || "";
+              state.lastReportDay = o3.lrd || "";
+              state.remoteFailCount = o3.rfc || 0;
+              state.remoteOffline = (o3.rof || 0) === 1;
 
-          state.lwIn = o4.lwi || 0;
-          state.lwOut = o4.lwo || 0;
-          state.lwDrink = o4.lwt || 0;
-          state.lwKey = o4.lwk || "";
-          state.lmIn = o4.lmi || 0;
-          state.lmOut = o4.lmo || 0;
-          state.lmDrink = o4.lmt || 0;
-          state.lmKey = o4.lmk || "";
-          cb();
+              state.lwIn = o4.lwi || 0;
+              state.lwOut = o4.lwo || 0;
+              state.lwDrink = o4.lwt || 0;
+              state.lwKey = o4.lwk || "";
+              state.lmIn = o4.lmi || 0;
+              state.lmOut = o4.lmo || 0;
+              state.lmDrink = o4.lmt || 0;
+              state.lmKey = o4.lmk || "";
+
+              let defHourly = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+              try {
+                let a5 = JSON.parse(v5);
+                state.todayHourly = (a5 && a5.length === 48) ? a5 : defHourly;
+              } catch (e) { state.todayHourly = defHourly; }
+              try {
+                let a6 = JSON.parse(v6);
+                state.yHourly = (a6 && a6.length === 48) ? a6 : defHourly;
+              } catch (e) { state.yHourly = defHourly; }
+
+              cb();
+            });
+          });
         });
       });
     });
@@ -594,6 +621,10 @@ function processPeriods(now) {
     state.yDrink = clampDrink(state.yIn, state.yOut);
     state.yKey = state.dayKey;
 
+    // 30-Min-Slots des Vortags sichern, heute-Array zuruecksetzen
+    state.yHourly = state.todayHourly;
+    state.todayHourly = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+
     state.dayKey = dKey;
     state.dayInStart = state.inTotal;
     state.dayOutStart = state.outTotal;
@@ -630,15 +661,118 @@ function processPeriods(now) {
   }
 }
 
+// URL-Kodierung fuer Chart-Config (mJS hat kein encodeURIComponent)
+function urlEncodeChart(s) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    let c = s[i];
+    if (c === "\"") out += "%22";
+    else if (c === " ") out += "%20";
+    else if (c === "&") out += "%26";
+    else if (c === "=") out += "%3D";
+    else if (c === "%") out += "%25";
+    else if (c === "#") out += "%23";
+    else if (c === "+") out += "%2B";
+    else out += c;
+    i++;
+  }
+  return out;
+}
+
+// Baut quickchart.io/chart URL (offizieller Endpoint) fuer 30-Min-Verlauf.
+// yHourly: Array[48] in 1/10 Liter, Slot 0 = 00:00-00:30.
+function buildSparkUrl(yHourly, dayLabel) {
+  let dataArr = [];
+  let i = 0;
+  while (i < 48) {
+    dataArr.push(Math.round(yHourly[i]) / 10);
+    i++;
+  }
+  // X-Achse: Uhrzeiten 00:00, 00:30, 01:00, ... 23:30 (Slot j = 2*h + m/30)
+  let labels = [];
+  let j = 0;
+  while (j < 48) {
+    let h = Math.floor(j / 2);
+    let m = (j % 2) * 30;
+    labels.push(z(h) + ":" + z(m));
+    j++;
+  }
+  let cfg = {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [{ label: "Produktwasser L", data: dataArr, backgroundColor: "rgba(25,118,210,0.6)" }],
+    },
+    options: {
+      title: { display: true, text: "Produktwasser " + dayLabel },
+      scales: { yAxes: [{ ticks: { beginAtZero: true } }] },
+      legend: { display: false },
+    },
+  };
+  let json = JSON.stringify(cfg);
+  return "https://quickchart.io/chart?w=600&h=300&bkg=white&c=" + urlEncodeChart(json);
+}
+
+function sendWaChart(chartUrl, caption, attempt) {
+  // WAHA /api/sendImage mit externem Bild-URL (WAHA holt das Bild von quickchart.io)
+  let imgEndpoint = CFG.wahaUrl.replace("sendText", "sendImage");
+  Shelly.call(
+    "HTTP.Request",
+    {
+      method: "POST",
+      url: imgEndpoint,
+      timeout: 20,
+      ssl_ca: "*",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Api-Key": CFG.wahaApiKey,
+      },
+      body: JSON.stringify({
+        chatId: CFG.waChatId,
+        session: CFG.waSession,
+        caption: caption,
+        file: {
+          url: chartUrl,
+          filename: "produktwasser.png",
+          mimetype: "image/png",
+        },
+      }),
+    },
+    function (res, ec, em) {
+      if (ec === 0 && res && res.code >= 200 && res.code < 300) {
+        print("WAHA chart sent.");
+        return;
+      }
+      if (attempt < CFG.waRetries) {
+        let waitMs = CFG.waRetryBaseSec * attempt * 1000;
+        print("WAHA chart retry", attempt + 1, "in", waitMs, "ms");
+        Timer.set(waitMs, false, function () {
+          sendWaChart(chartUrl, caption, attempt + 1);
+        });
+      } else {
+        print("WAHA chart failed:", ec, em, res ? res.code : "no-code");
+      }
+    }
+  );
+}
+
 function maybeSendDaily(now) {
-  let hm = todayHm(now);
   let dKey = dayKeyNow(now);
-  if (hm !== CFG.dailySendTime) return;
+  if (now.getHours() !== CFG.dailySendHour) return;
   if (state.lastReportDay === dKey) return; // heute schon gesendet
   if (!state.yKey) return; // noch kein Vortag vorhanden
 
+  // Zuerst Diagramm senden, dann 3 Sekunden spaeter den Textbericht
+  let chartUrl = buildSparkUrl(state.yHourly, state.yKey);
+  sendWaChart(chartUrl, "📊 Produktwasser " + state.yKey, 1);
+
   let text = buildScheduledReport(now);
-  sendWaReport(text, 1);
+  Timer.set(3000, false, function () {
+    sendWaReport(text, 1);
+  });
+
   state.lastReportDay = dKey;
 }
 
@@ -663,6 +797,17 @@ function doTick(doneCb) {
 
       let now = new Date();
       processPeriods(now);
+
+      // 30-Min-Delta Produktwasser akkumulieren (nach Initialisierung und Tag-Rollover)
+      if (state.initialized) {
+        let prevProd = clampDrink(state.lastIn, state.lastOut);
+        let delta = state.drinkTotal - prevProd;
+        if (delta > 0) {
+          let slot = now.getHours() * 2 + (now.getMinutes() >= 30 ? 1 : 0);
+          state.todayHourly[slot] = state.todayHourly[slot] + Math.round(delta * 10);
+        }
+      }
+
       maybeSendDaily(now);
 
       state.lastIn = state.inTotal;
@@ -697,7 +842,7 @@ function validateConfig() {
 function start() {
   validateConfig();
   loadState(function () {
-    // Direkt einmal rechnen und danach zyklisch.
+    // Sofort einmal rechnen (Initialisierung und initiale Werte)
     doTick(function () {
       if (CFG.sendTestOnStart) {
         let now = new Date();
@@ -705,9 +850,30 @@ function start() {
         sendWaReport(testText, 1);
         print("Test report triggered on start.");
       }
+      if (CFG.sendDailyReportTestOnStart) {
+        let now = new Date();
+        let chartData = state.yKey ? state.yHourly : state.todayHourly;
+        let chartLabel = state.yKey ? state.yKey : dayKeyNow(now) + " (Test)";
+        let chartUrl = buildSparkUrl(chartData, chartLabel);
+        sendWaChart(chartUrl, "📊 Produktwasser " + chartLabel + " (Test)", 1);
+        let reportText = state.yKey ? buildScheduledReport(now) : buildTestReport(now);
+        Timer.set(3000, false, function () {
+          sendWaReport(reportText, 1);
+          print("Daily report test (Chart + Text) sent.");
+        });
+      }
     });
-    Timer.set(CFG.tickSeconds * 1000, true, doTick);
-    print("Master script started.");
+
+    // Timer auf naechste :00 oder :30 Marke ausrichten, dann alle 30 Min
+    let n = new Date();
+    let minRemainder = n.getMinutes() % 30;
+    let secInSlot = minRemainder * 60 + n.getSeconds();
+    let msToNext = (1800 - secInSlot) * 1000 - n.getMilliseconds();
+    print("Master script started. Naechster Tick in " + Math.round(msToNext / 1000) + "s.");
+    Timer.set(msToNext, false, function () {
+      doTick(null);
+      Timer.set(CFG.tickSeconds * 1000, true, doTick);
+    });
   });
 }
 
