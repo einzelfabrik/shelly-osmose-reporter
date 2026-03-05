@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0 - 2026-03-05
+
+- Added Shelly Plug energy tracking (kWh total, day/week/month deltas)
+- Added combined chart dataset: Produktwasser bars + Energie line (dual Y-axis)
+- Added energy slots (48 per day) with KVS-safe storage split (`osm.s7` to `osm.s9`)
+- Added Plug offline handling and report warnings
+- Updated project description and Shelly runtime documentation
+
 ## v0.1.0 - 2026-03-04
 
 - Public initial release of `shelly-osmose-reporter`

@@ -14,6 +14,7 @@
 let CFG = {
   inputId: 2,
   remoteAblaufStatusUrl: "http://SHELLY_ABWASSER_IP/rpc/Input.GetStatus?id=2",
+  remotePlugStatusUrl: "http://SHELLY_PLUG_IP/rpc/Shelly.GetStatus",
   tickSeconds: 1800,
   dailySendHour: 6,
   sendTestOnStart: false, // true => sendet beim Script-Start sofort einen Testreport
@@ -69,9 +70,25 @@ let state = {
   remoteFailCount: 0,
   remoteOffline: false,
 
+  // Plug Energie (kWh)
+  energyTotal: 0,
+  lastEnergy: 0,
+  dayEnergyStart: 0,
+  weekEnergyStart: 0,
+  monthEnergyStart: 0,
+  yEnergy: 0,
+  lwEnergy: 0,
+  lmEnergy: 0,
+  plugFailCount: 0,
+  plugOffline: false,
+
   // 30-Min-Slots Produktwasser deltas (integers, 1/10 Liter), 48 Slots/Tag
   todayHourly: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
   yHourly:     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+
+  // 30-Min-Slots Energie deltas (integers, 0.01 kWh), 48 Slots/Tag
+  todayEnergySlots: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  yEnergySlots:     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
 
   initialized: false,
 };
@@ -86,6 +103,16 @@ function round3(v) {
   return Math.round(v * 1000) / 1000;
 }
 
+function zero48Array() {
+  let a = [];
+  let i = 0;
+  while (i < 48) {
+    a.push(0);
+    i++;
+  }
+  return a;
+}
+
 function asLitersFromStatus(st) {
   if (!st || !st.counts) return 0;
   if (typeof st.counts.xtotal === "number") return st.counts.xtotal;
@@ -98,6 +125,44 @@ function safeLitersFromStatus(st, sourceLabel) {
     return asLitersFromStatus(st);
   } catch (e) {
     print("parse liters error (" + sourceLabel + ")");
+    return 0;
+  }
+}
+
+function asEnergyKwhFromStatus(st) {
+  if (!st) return 0;
+
+  // Gen2 Plug: Shelly.GetStatus -> switch:0.aenergy.total (Wh)
+  let sw = st["switch:0"];
+  if (sw && sw.aenergy && typeof sw.aenergy.total === "number") {
+    return sw.aenergy.total / 1000.0;
+  }
+
+  // Weitere Gen2 Komponenten mit Energie
+  let em = st["em:0"];
+  if (em && em.aenergy && typeof em.aenergy.total === "number") {
+    return em.aenergy.total / 1000.0;
+  }
+
+  // Gen1 Muster
+  if (st.meters && st.meters[0] && typeof st.meters[0].total === "number") {
+    return st.meters[0].total / 1000.0;
+  }
+  if (st.emeters && st.emeters[0] && typeof st.emeters[0].total === "number") {
+    return st.emeters[0].total / 1000.0;
+  }
+
+  // Fallback
+  if (typeof st.total_act_energy === "number") return st.total_act_energy / 1000.0;
+  if (typeof st.total === "number") return st.total / 1000.0;
+  return 0;
+}
+
+function safeEnergyKwhFromStatus(st, sourceLabel) {
+  try {
+    return asEnergyKwhFromStatus(st);
+  } catch (e) {
+    print("parse energy error (" + sourceLabel + ")");
     return 0;
   }
 }
@@ -206,6 +271,10 @@ function fmtPct2(v) {
   return fmtFixed(v, 2) + " %";
 }
 
+function fmtKwh2(v) {
+  return fmtFixed(v, 2) + " kWh";
+}
+
 function padRight(text, width) {
   let s = text;
   while (s.length < width) s += " ";
@@ -275,13 +344,33 @@ function saveState(cb) {
 
   let s5 = JSON.stringify(state.todayHourly);
   let s6 = JSON.stringify(state.yHourly);
+  let s7 = JSON.stringify({
+    e: round3(state.energyTotal),
+    le: round3(state.lastEnergy),
+    des: round3(state.dayEnergyStart),
+    wes: round3(state.weekEnergyStart),
+    mes: round3(state.monthEnergyStart),
+    ye: round3(state.yEnergy),
+    lwe: round3(state.lwEnergy),
+    lme: round3(state.lmEnergy),
+    pfc: state.plugFailCount,
+    pof: state.plugOffline ? 1 : 0,
+  });
+  let s8 = JSON.stringify(state.todayEnergySlots);
+  let s9 = JSON.stringify(state.yEnergySlots);
 
   kvsSet("osm.s1", s1, function () {
     kvsSet("osm.s2", s2, function () {
       kvsSet("osm.s3", s3, function () {
         kvsSet("osm.s4", s4, function () {
           kvsSet("osm.s5", s5, function () {
-            kvsSet("osm.s6", s6, cb);
+            kvsSet("osm.s6", s6, function () {
+              kvsSet("osm.s7", s7, function () {
+                kvsSet("osm.s8", s8, function () {
+                  kvsSet("osm.s9", s9, cb);
+                });
+              });
+            });
           });
         });
       });
@@ -305,55 +394,82 @@ function loadState(cb) {
         kvsGet("osm.s4", function (v4) {
           kvsGet("osm.s5", function (v5) {
             kvsGet("osm.s6", function (v6) {
-              let o1 = parseJsonOrEmpty(v1);
-              let o2 = parseJsonOrEmpty(v2);
-              let o3 = parseJsonOrEmpty(v3);
-              let o4 = parseJsonOrEmpty(v4);
+              kvsGet("osm.s7", function (v7) {
+                kvsGet("osm.s8", function (v8) {
+                  kvsGet("osm.s9", function (v9) {
+                    let o1 = parseJsonOrEmpty(v1);
+                    let o2 = parseJsonOrEmpty(v2);
+                    let o3 = parseJsonOrEmpty(v3);
+                    let o4 = parseJsonOrEmpty(v4);
+                    let o7 = parseJsonOrEmpty(v7);
 
-              state.inTotal = o1.i || 0;
-              state.outTotal = o1.o || 0;
-              state.drinkTotal = o1.t || 0;
-              state.lastIn = o1.li || 0;
-              state.lastOut = o1.lo || 0;
+                    state.inTotal = o1.i || 0;
+                    state.outTotal = o1.o || 0;
+                    state.drinkTotal = o1.t || 0;
+                    state.lastIn = o1.li || 0;
+                    state.lastOut = o1.lo || 0;
 
-              state.dayKey = o2.dk || "";
-              state.dayInStart = o2.dis || 0;
-              state.dayOutStart = o2.dos || 0;
-              state.weekKey = o2.wk || "";
-              state.weekInStart = o2.wis || 0;
-              state.weekOutStart = o2.wos || 0;
-              state.monthKey = o2.mk || "";
-              state.monthInStart = o2.mis || 0;
-              state.monthOutStart = o2.mos || 0;
+                    state.dayKey = o2.dk || "";
+                    state.dayInStart = o2.dis || 0;
+                    state.dayOutStart = o2.dos || 0;
+                    state.weekKey = o2.wk || "";
+                    state.weekInStart = o2.wis || 0;
+                    state.weekOutStart = o2.wos || 0;
+                    state.monthKey = o2.mk || "";
+                    state.monthInStart = o2.mis || 0;
+                    state.monthOutStart = o2.mos || 0;
 
-              state.yIn = o3.yi || 0;
-              state.yOut = o3.yo || 0;
-              state.yDrink = o3.yt || 0;
-              state.yKey = o3.yk || "";
-              state.lastReportDay = o3.lrd || "";
-              state.remoteFailCount = o3.rfc || 0;
-              state.remoteOffline = (o3.rof || 0) === 1;
+                    state.yIn = o3.yi || 0;
+                    state.yOut = o3.yo || 0;
+                    state.yDrink = o3.yt || 0;
+                    state.yKey = o3.yk || "";
+                    state.lastReportDay = o3.lrd || "";
+                    state.remoteFailCount = o3.rfc || 0;
+                    state.remoteOffline = (o3.rof || 0) === 1;
 
-              state.lwIn = o4.lwi || 0;
-              state.lwOut = o4.lwo || 0;
-              state.lwDrink = o4.lwt || 0;
-              state.lwKey = o4.lwk || "";
-              state.lmIn = o4.lmi || 0;
-              state.lmOut = o4.lmo || 0;
-              state.lmDrink = o4.lmt || 0;
-              state.lmKey = o4.lmk || "";
+                    state.lwIn = o4.lwi || 0;
+                    state.lwOut = o4.lwo || 0;
+                    state.lwDrink = o4.lwt || 0;
+                    state.lwKey = o4.lwk || "";
+                    state.lmIn = o4.lmi || 0;
+                    state.lmOut = o4.lmo || 0;
+                    state.lmDrink = o4.lmt || 0;
+                    state.lmKey = o4.lmk || "";
 
-              let defHourly = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
-              try {
-                let a5 = JSON.parse(v5);
-                state.todayHourly = (a5 && a5.length === 48) ? a5 : defHourly;
-              } catch (e) { state.todayHourly = defHourly; }
-              try {
-                let a6 = JSON.parse(v6);
-                state.yHourly = (a6 && a6.length === 48) ? a6 : defHourly;
-              } catch (e) { state.yHourly = defHourly; }
+                    state.energyTotal = o7.e || 0;
+                    state.lastEnergy = o7.le || 0;
+                    state.dayEnergyStart = o7.des || 0;
+                    state.weekEnergyStart = o7.wes || 0;
+                    state.monthEnergyStart = o7.mes || 0;
+                    state.yEnergy = o7.ye || 0;
+                    state.lwEnergy = o7.lwe || 0;
+                    state.lmEnergy = o7.lme || 0;
+                    state.plugFailCount = o7.pfc || 0;
+                    state.plugOffline = (o7.pof || 0) === 1;
 
-              cb();
+                    let defWater = zero48Array();
+                    let defEnergy = zero48Array();
+                    try {
+                      let a5 = JSON.parse(v5);
+                      state.todayHourly = (a5 && a5.length === 48) ? a5 : zero48Array();
+                    } catch (e) { state.todayHourly = defWater; }
+                    try {
+                      let a6 = JSON.parse(v6);
+                      state.yHourly = (a6 && a6.length === 48) ? a6 : zero48Array();
+                    } catch (e) { state.yHourly = zero48Array(); }
+                    try {
+                      let a8 = JSON.parse(v8);
+                      state.todayEnergySlots = (a8 && a8.length === 48) ? a8 : defEnergy;
+                    } catch (e) { state.todayEnergySlots = zero48Array(); }
+                    try {
+                      let a9 = JSON.parse(v9);
+                      state.yEnergySlots = (a9 && a9.length === 48) ? a9 : zero48Array();
+                    } catch (e) { state.yEnergySlots = zero48Array(); }
+
+                    cb();
+                  });
+                });
+              });
             });
           });
         });
@@ -414,6 +530,36 @@ function fetchRemoteOut(cb) {
   );
 }
 
+
+function fetchRemotePlugEnergy(cb) {
+  Shelly.call(
+    "HTTP.Request",
+    {
+      method: "GET",
+      url: CFG.remotePlugStatusUrl,
+      timeout: 10,
+      ssl_ca: "*",
+    },
+    function (res, ec, em) {
+      if (ec !== 0) {
+        cb("plug HTTP failed: " + em, state.lastEnergy || 0);
+        return;
+      }
+      let code = (res && res.code) || 0;
+      if (code < 200 || code >= 300) {
+        cb("plug HTTP status " + code, state.lastEnergy || 0);
+        return;
+      }
+      let body = parseRemoteBody(res);
+      if (!body) {
+        cb("plug JSON parse failed", state.lastEnergy || 0);
+        return;
+      }
+      cb(null, safeEnergyKwhFromStatus(body, "plug"));
+    }
+  );
+}
+
 function sendWaReport(text, attempt) {
   Shelly.call(
     "HTTP.Request",
@@ -464,6 +610,18 @@ function markRemoteHealth(errOut) {
   state.remoteOffline = false;
 }
 
+function markPlugHealth(errPlug) {
+  if (errPlug) {
+    state.plugFailCount = state.plugFailCount + 1;
+    if (state.plugFailCount >= CFG.remoteOfflineFailThreshold) {
+      state.plugOffline = true;
+    }
+    return;
+  }
+  state.plugFailCount = 0;
+  state.plugOffline = false;
+}
+
 function buildScheduledReport(now) {
   let dayEff = state.yIn > 0 ? (state.yDrink / state.yIn) * 100.0 : 0.0;
   let includeLastWeek = now.getDay() === 1 && !!state.lwKey; // Montag
@@ -490,6 +648,8 @@ function buildScheduledReport(now) {
     "\n" +
     tableRow("Ausbeute", fmtPct2(dayEff)) +
     "\n" +
+    tableRow("Energie", fmtKwh2(state.yEnergy)) +
+    "\n" +
     codeFence;
 
   if (includeLastWeek) {
@@ -508,6 +668,8 @@ function buildScheduledReport(now) {
       tableRow("Produktwasser", fmtL2(state.lwDrink)) +
       "\n" +
       tableRow("Ausbeute", fmtPct2(weekEff)) +
+      "\n" +
+      tableRow("Energie", fmtKwh2(state.lwEnergy)) +
       "\n" +
       codeFence;
   }
@@ -529,6 +691,8 @@ function buildScheduledReport(now) {
       "\n" +
       tableRow("Ausbeute", fmtPct2(monthEff)) +
       "\n" +
+      tableRow("Energie", fmtKwh2(state.lmEnergy)) +
+      "\n" +
       codeFence;
   }
 
@@ -538,6 +702,13 @@ function buildScheduledReport(now) {
       "⚠️ *Hinweis*\n" +
       "Ablauf-Shelly ist derzeit nicht erreichbar.\n" +
       "Der Ablaufwert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
+  }
+  if (state.plugOffline) {
+    txt +=
+      "\n\n" +
+      "⚠️ *Hinweis*\n" +
+      "Shelly Plug ist derzeit nicht erreichbar.\n" +
+      "Der Energiewert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
   }
 
   return txt;
@@ -551,6 +722,8 @@ function buildTestReport(now) {
   let dayDrink = clampDrink(dayIn, dayOut);
   let dayEff = dayIn > 0 ? (dayDrink / dayIn) * 100.0 : 0.0;
   let totalEff = state.inTotal > 0 ? (state.drinkTotal / state.inTotal) * 100.0 : 0.0;
+  let dayEnergy = state.energyTotal - state.dayEnergyStart;
+  if (dayEnergy < 0) dayEnergy = 0;
   let codeFence = "```";
 
   return (
@@ -571,6 +744,8 @@ function buildTestReport(now) {
     "\n" +
     tableRow("Ausbeute", fmtPct2(dayEff)) +
     "\n" +
+    tableRow("Energie", fmtKwh2(dayEnergy)) +
+    "\n" +
     codeFence +
     "\n\n" +
     "🏁 *Gesamt seit Start*\n" +
@@ -584,9 +759,14 @@ function buildTestReport(now) {
     "\n" +
     tableRow("Ausbeute", fmtPct2(totalEff)) +
     "\n" +
+    tableRow("Energie", fmtKwh2(state.energyTotal)) +
+    "\n" +
     codeFence +
     (state.remoteOffline
       ? "\n\n⚠️ *Hinweis*\nAblauf-Shelly ist derzeit nicht erreichbar."
+      : "") +
+    (state.plugOffline
+      ? "\n\n⚠️ *Hinweis*\nShelly Plug ist derzeit nicht erreichbar."
       : "")
   );
 }
@@ -600,14 +780,18 @@ function processPeriods(now) {
     state.dayKey = dKey;
     state.dayInStart = state.inTotal;
     state.dayOutStart = state.outTotal;
+    state.dayEnergyStart = state.energyTotal;
     state.weekKey = wKey;
     state.weekInStart = state.inTotal;
     state.weekOutStart = state.outTotal;
+    state.weekEnergyStart = state.energyTotal;
     state.monthKey = mKey;
     state.monthInStart = state.inTotal;
     state.monthOutStart = state.outTotal;
+    state.monthEnergyStart = state.energyTotal;
     state.lastIn = state.inTotal;
     state.lastOut = state.outTotal;
+    state.lastEnergy = state.energyTotal;
     state.initialized = true;
     return;
   }
@@ -616,48 +800,61 @@ function processPeriods(now) {
   if (state.dayKey !== dKey) {
     state.yIn = state.lastIn - state.dayInStart;
     state.yOut = state.lastOut - state.dayOutStart;
+    state.yEnergy = state.lastEnergy - state.dayEnergyStart;
     if (state.yIn < 0) state.yIn = 0;
     if (state.yOut < 0) state.yOut = 0;
+    if (state.yEnergy < 0) state.yEnergy = 0;
     state.yDrink = clampDrink(state.yIn, state.yOut);
     state.yKey = state.dayKey;
 
     // 30-Min-Slots des Vortags sichern, heute-Array zuruecksetzen
     state.yHourly = state.todayHourly;
-    state.todayHourly = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+    state.todayHourly = zero48Array();
+    state.yEnergySlots = state.todayEnergySlots;
+    state.todayEnergySlots = zero48Array();
 
     state.dayKey = dKey;
     state.dayInStart = state.inTotal;
     state.dayOutStart = state.outTotal;
+    state.dayEnergyStart = state.energyTotal;
   }
 
   if (state.weekKey !== wKey) {
     let prevWeekIn = state.lastIn - state.weekInStart;
     let prevWeekOut = state.lastOut - state.weekOutStart;
+    let prevWeekEnergy = state.lastEnergy - state.weekEnergyStart;
     if (prevWeekIn < 0) prevWeekIn = 0;
     if (prevWeekOut < 0) prevWeekOut = 0;
+    if (prevWeekEnergy < 0) prevWeekEnergy = 0;
     state.lwIn = prevWeekIn;
     state.lwOut = prevWeekOut;
     state.lwDrink = clampDrink(prevWeekIn, prevWeekOut);
+    state.lwEnergy = prevWeekEnergy;
     state.lwKey = state.weekKey;
 
     state.weekKey = wKey;
     state.weekInStart = state.inTotal;
     state.weekOutStart = state.outTotal;
+    state.weekEnergyStart = state.energyTotal;
   }
 
   if (state.monthKey !== mKey) {
     let prevMonthIn = state.lastIn - state.monthInStart;
     let prevMonthOut = state.lastOut - state.monthOutStart;
+    let prevMonthEnergy = state.lastEnergy - state.monthEnergyStart;
     if (prevMonthIn < 0) prevMonthIn = 0;
     if (prevMonthOut < 0) prevMonthOut = 0;
+    if (prevMonthEnergy < 0) prevMonthEnergy = 0;
     state.lmIn = prevMonthIn;
     state.lmOut = prevMonthOut;
     state.lmDrink = clampDrink(prevMonthIn, prevMonthOut);
+    state.lmEnergy = prevMonthEnergy;
     state.lmKey = state.monthKey;
 
     state.monthKey = mKey;
     state.monthInStart = state.inTotal;
     state.monthOutStart = state.outTotal;
+    state.monthEnergyStart = state.energyTotal;
   }
 }
 
@@ -682,11 +879,13 @@ function urlEncodeChart(s) {
 
 // Baut quickchart.io/chart URL (offizieller Endpoint) fuer 30-Min-Verlauf.
 // yHourly: Array[48] in 1/10 Liter, Slot 0 = 00:00-00:30.
-function buildSparkUrl(yHourly, dayLabel) {
-  let dataArr = [];
+function buildSparkUrl(yHourly, yEnergySlots, dayLabel) {
+  let waterArr = [];
+  let energyArr = [];
   let i = 0;
   while (i < 48) {
-    dataArr.push(Math.round(yHourly[i]) / 10);
+    waterArr.push(Math.round(yHourly[i]) / 10);
+    energyArr.push(Math.round(yEnergySlots[i]) / 100);
     i++;
   }
   // X-Achse: Uhrzeiten 00:00, 00:30, 01:00, ... 23:30 (Slot j = 2*h + m/30)
@@ -702,16 +901,21 @@ function buildSparkUrl(yHourly, dayLabel) {
     type: "bar",
     data: {
       labels: labels,
-      datasets: [{ label: "Produktwasser L", data: dataArr, backgroundColor: "rgba(25,118,210,0.6)" }],
+      datasets: [
+        { label: "Produktwasser L", yAxisID: "yL", data: waterArr, backgroundColor: "rgba(25,118,210,0.60)" },
+        { type: "line", label: "Energie kWh", yAxisID: "yE", data: energyArr, fill: false, pointRadius: 0, borderWidth: 2, borderColor: "rgba(245,124,0,1)", backgroundColor: "rgba(245,124,0,1)" }
+      ],
     },
     options: {
-      title: { display: true, text: "Produktwasser " + dayLabel },
-      scales: { yAxes: [{ ticks: { beginAtZero: true } }] },
-      legend: { display: false },
+      title: { display: true, text: "Produktwasser + Energie " + dayLabel },
+      scales: { yAxes: [
+        { id: "yL", position: "left", ticks: { beginAtZero: true } },
+        { id: "yE", position: "right", ticks: { beginAtZero: true }, gridLines: { drawOnChartArea: false } }
+      ] },
     },
   };
   let json = JSON.stringify(cfg);
-  return "https://quickchart.io/chart?w=600&h=300&bkg=white&c=" + urlEncodeChart(json);
+  return "https://quickchart.io/chart?w=640&h=320&bkg=white&c=" + urlEncodeChart(json);
 }
 
 function sendWaChart(chartUrl, caption, attempt) {
@@ -765,8 +969,8 @@ function maybeSendDaily(now) {
   if (!state.yKey) return; // noch kein Vortag vorhanden
 
   // Zuerst Diagramm senden, dann 3 Sekunden spaeter den Textbericht
-  let chartUrl = buildSparkUrl(state.yHourly, state.yKey);
-  sendWaChart(chartUrl, "📊 Produktwasser " + state.yKey, 1);
+  let chartUrl = buildSparkUrl(state.yHourly, state.yEnergySlots, state.yKey);
+  sendWaChart(chartUrl, "📊 Produktwasser + Energie " + state.yKey, 1);
 
   let text = buildScheduledReport(now);
   Timer.set(3000, false, function () {
@@ -791,43 +995,60 @@ function doTick(doneCb) {
       if (errOut) print(errOut);
       markRemoteHealth(errOut);
 
-      state.inTotal = round3(inL);
-      state.outTotal = round3(outL);
-      state.drinkTotal = round3(clampDrink(state.inTotal, state.outTotal));
+      fetchRemotePlugEnergy(function (errPlug, energyKwh) {
+        if (errPlug) print(errPlug);
+        markPlugHealth(errPlug);
 
-      let now = new Date();
-      processPeriods(now);
+        state.inTotal = round3(inL);
+        state.outTotal = round3(outL);
+        state.drinkTotal = round3(clampDrink(state.inTotal, state.outTotal));
+        state.energyTotal = round3(energyKwh);
 
-      // 30-Min-Delta Produktwasser akkumulieren (nach Initialisierung und Tag-Rollover)
-      if (state.initialized) {
-        let prevProd = clampDrink(state.lastIn, state.lastOut);
-        let delta = state.drinkTotal - prevProd;
-        if (delta > 0) {
+        let now = new Date();
+        processPeriods(now);
+
+        // 30-Min-Delta Produktwasser/Energie akkumulieren (nach Initialisierung und Tag-Rollover)
+        if (state.initialized) {
+          let prevProd = clampDrink(state.lastIn, state.lastOut);
+          let deltaWater = state.drinkTotal - prevProd;
+          let deltaEnergy = state.energyTotal - state.lastEnergy;
           let slot = now.getHours() * 2 + (now.getMinutes() >= 30 ? 1 : 0);
-          state.todayHourly[slot] = state.todayHourly[slot] + Math.round(delta * 10);
+          if (deltaWater > 0) {
+            state.todayHourly[slot] = state.todayHourly[slot] + Math.round(deltaWater * 10);
+          }
+          if (deltaEnergy > 0) {
+            state.todayEnergySlots[slot] = state.todayEnergySlots[slot] + Math.round(deltaEnergy * 100);
+          }
         }
-      }
 
-      maybeSendDaily(now);
+        maybeSendDaily(now);
 
-      state.lastIn = state.inTotal;
-      state.lastOut = state.outTotal;
+        state.lastIn = state.inTotal;
+        state.lastOut = state.outTotal;
+        state.lastEnergy = state.energyTotal;
 
-      saveState(function () {
-        print(
-          "in=" +
-            state.inTotal +
-            "L out=" +
-            state.outTotal +
-            "L drink=" +
-            state.drinkTotal +
-            "L y=" +
-            state.yDrink +
-            "L remoteOffline=" +
-            (state.remoteOffline ? "yes" : "no")
-        );
-        busy = false;
-        if (doneCb) doneCb();
+        saveState(function () {
+          print(
+            "in=" +
+              state.inTotal +
+              "L out=" +
+              state.outTotal +
+              "L drink=" +
+              state.drinkTotal +
+              "L energy=" +
+              state.energyTotal +
+              "kWh y=" +
+              state.yDrink +
+              "L yE=" +
+              state.yEnergy +
+              "kWh remoteOffline=" +
+              (state.remoteOffline ? "yes" : "no") +
+              " plugOffline=" +
+              (state.plugOffline ? "yes" : "no")
+          );
+          busy = false;
+          if (doneCb) doneCb();
+        });
       });
     });
   });
@@ -836,6 +1057,9 @@ function doTick(doneCb) {
 function validateConfig() {
   if (CFG.wahaApiKey === "CHANGE_ME") {
     print("WARN: Bitte CFG.wahaApiKey setzen.");
+  }
+  if (!CFG.remotePlugStatusUrl) {
+    print("WARN: Bitte CFG.remotePlugStatusUrl setzen.");
   }
 }
 
@@ -853,9 +1077,10 @@ function start() {
       if (CFG.sendDailyReportTestOnStart) {
         let now = new Date();
         let chartData = state.yKey ? state.yHourly : state.todayHourly;
+        let energyChartData = state.yKey ? state.yEnergySlots : state.todayEnergySlots;
         let chartLabel = state.yKey ? state.yKey : dayKeyNow(now) + " (Test)";
-        let chartUrl = buildSparkUrl(chartData, chartLabel);
-        sendWaChart(chartUrl, "📊 Produktwasser " + chartLabel + " (Test)", 1);
+        let chartUrl = buildSparkUrl(chartData, energyChartData, chartLabel);
+        sendWaChart(chartUrl, "📊 Produktwasser + Energie " + chartLabel + " (Test)", 1);
         let reportText = state.yKey ? buildScheduledReport(now) : buildTestReport(now);
         Timer.set(3000, false, function () {
           sendWaReport(reportText, 1);
