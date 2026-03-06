@@ -20,6 +20,8 @@ let CFG = {
   sendTestOnStart: false, // true => sendet beim Script-Start sofort einen Testreport
   sendDailyReportTestOnStart: false, // true => sendet einmal Chart + Tagesbericht (wie morgens) zum Testen
   remoteOfflineFailThreshold: 2, // ab wie vielen Fehlern "offline" gesetzt wird
+  dailyReportStartDelaySec: 5, // entkoppelt Reportversand vom Tick/KVS-Write (RAM-Peak kleiner)
+  dailyReportTextDelaySec: 6, // Text bewusst nach Chart bauen/senden
 
   // WAHA
   wahaUrl: "https://your-waha.example.com/api/sendText",
@@ -968,16 +970,22 @@ function maybeSendDaily(now) {
   if (state.lastReportDay === dKey) return; // heute schon gesendet
   if (!state.yKey) return; // noch kein Vortag vorhanden
 
-  // Zuerst Diagramm senden, dann 3 Sekunden spaeter den Textbericht
-  let chartUrl = buildSparkUrl(state.yHourly, state.yEnergySlots, state.yKey);
-  sendWaChart(chartUrl, "📊 Produktwasser + Energie " + state.yKey, 1);
-
-  let text = buildScheduledReport(now);
-  Timer.set(3000, false, function () {
-    sendWaReport(text, 1);
-  });
-
+  // De-dupe sofort setzen; Versand wird verzögert gestartet, um RAM-Peaks zu glätten.
   state.lastReportDay = dKey;
+  let reportKey = state.yKey;
+
+  Timer.set(CFG.dailyReportStartDelaySec * 1000, false, function () {
+    let chartUrl = buildSparkUrl(state.yHourly, state.yEnergySlots, reportKey);
+    sendWaChart(chartUrl, "📊 Produktwasser + Energie " + reportKey, 1);
+    chartUrl = "";
+
+    // Text erst NACH dem Chart bauen/senden (senkt Speicher-Spitze)
+    Timer.set(CFG.dailyReportTextDelaySec * 1000, false, function () {
+      let text = buildScheduledReport(new Date());
+      sendWaReport(text, 1);
+      text = "";
+    });
+  });
 }
 
 function doTick(doneCb) {
@@ -1079,12 +1087,18 @@ function start() {
         let chartData = state.yKey ? state.yHourly : state.todayHourly;
         let energyChartData = state.yKey ? state.yEnergySlots : state.todayEnergySlots;
         let chartLabel = state.yKey ? state.yKey : dayKeyNow(now) + " (Test)";
-        let chartUrl = buildSparkUrl(chartData, energyChartData, chartLabel);
-        sendWaChart(chartUrl, "📊 Produktwasser + Energie " + chartLabel + " (Test)", 1);
-        let reportText = state.yKey ? buildScheduledReport(now) : buildTestReport(now);
-        Timer.set(3000, false, function () {
-          sendWaReport(reportText, 1);
-          print("Daily report test (Chart + Text) sent.");
+
+        Timer.set(CFG.dailyReportStartDelaySec * 1000, false, function () {
+          let chartUrl = buildSparkUrl(chartData, energyChartData, chartLabel);
+          sendWaChart(chartUrl, "📊 Produktwasser + Energie " + chartLabel + " (Test)", 1);
+          chartUrl = "";
+
+          Timer.set(CFG.dailyReportTextDelaySec * 1000, false, function () {
+            let reportText = state.yKey ? buildScheduledReport(new Date()) : buildTestReport(new Date());
+            sendWaReport(reportText, 1);
+            reportText = "";
+            print("Daily report test (Chart + Text) sent.");
+          });
         });
       }
     });
