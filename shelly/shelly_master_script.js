@@ -95,8 +95,10 @@ let state = {
   // Daily report queue: text first, chart on next tick
   pendingReportDay: "",
   pendingReportKey: "",
-  pendingText: false,
-  pendingChart: false,
+  pendingDailyText: false,
+  pendingDailyChart: false,
+  pendingWeeklyText: false,
+  pendingMonthlyText: false,
 
   initialized: false,
 };
@@ -369,8 +371,10 @@ function saveState(cb) {
   let s10 = JSON.stringify({
     prd: state.pendingReportDay,
     prk: state.pendingReportKey,
-    prt: state.pendingText ? 1 : 0,
-    prc: state.pendingChart ? 1 : 0,
+    pdt: state.pendingDailyText ? 1 : 0,
+    pdc: state.pendingDailyChart ? 1 : 0,
+    pwt: state.pendingWeeklyText ? 1 : 0,
+    pmt: state.pendingMonthlyText ? 1 : 0,
   });
 
   kvsSet("osm.s1", s1, function () {
@@ -466,8 +470,10 @@ function loadState(cb) {
                       state.plugOffline = (o7.pof || 0) === 1;
                       state.pendingReportDay = o10.prd || "";
                       state.pendingReportKey = o10.prk || "";
-                      state.pendingText = (o10.prt || 0) === 1;
-                      state.pendingChart = (o10.prc || 0) === 1;
+                      state.pendingDailyText = (o10.pdt || 0) === 1;
+                      state.pendingDailyChart = (o10.pdc || 0) === 1;
+                      state.pendingWeeklyText = (o10.pwt || 0) === 1;
+                      state.pendingMonthlyText = (o10.pmt || 0) === 1;
 
                       let defWater = zero48Array();
                       let defEnergy = zero48Array();
@@ -645,10 +651,27 @@ function markPlugHealth(errPlug) {
   state.plugOffline = false;
 }
 
-function buildScheduledReport(now) {
+function buildReportWarnings() {
+  let txt = "";
+  if (state.remoteOffline) {
+    txt +=
+      "\n\n" +
+      "⚠️ *Hinweis*\n" +
+      "Ablauf-Shelly ist derzeit nicht erreichbar.\n" +
+      "Der Ablaufwert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
+  }
+  if (state.plugOffline) {
+    txt +=
+      "\n\n" +
+      "⚠️ *Hinweis*\n" +
+      "Shelly Plug ist derzeit nicht erreichbar.\n" +
+      "Der Energiewert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
+  }
+  return txt;
+}
+
+function buildDailyReport(now) {
   let dayEff = state.yIn > 0 ? (state.yDrink / state.yIn) * 100.0 : 0.0;
-  let includeLastWeek = now.getDay() === 1 && !!state.lwKey; // Montag
-  let includeLastMonth = now.getDate() === 1 && !!state.lmKey; // Monatserster
   let codeFence = "```";
 
   let txt =
@@ -675,66 +698,79 @@ function buildScheduledReport(now) {
     "\n" +
     codeFence;
 
-  if (includeLastWeek) {
-    let weekEff = state.lwIn > 0 ? (state.lwDrink / state.lwIn) * 100.0 : 0.0;
-    txt +=
-      "\n\n" +
-      "📆 *Letzte Woche* (" +
-      state.lwKey +
-      ")\n" +
-      codeFence +
-      "\n" +
-      tableRow("Zulauf", fmtL2(state.lwIn)) +
-      "\n" +
-      tableRow("Abwasser", fmtL2(state.lwOut)) +
-      "\n" +
-      tableRow("Produktwasser", fmtL2(state.lwDrink)) +
-      "\n" +
-      tableRow("Ausbeute", fmtPct2(weekEff)) +
-      "\n" +
-      tableRow("Energie", fmtKwh2(state.lwEnergy)) +
-      "\n" +
-      codeFence;
-  }
-
-  if (includeLastMonth) {
-    let monthEff = state.lmIn > 0 ? (state.lmDrink / state.lmIn) * 100.0 : 0.0;
-    txt +=
-      "\n\n" +
-      "🗓️ *Letzter Monat* (" +
-      state.lmKey +
-      ")\n" +
-      codeFence +
-      "\n" +
-      tableRow("Zulauf", fmtL2(state.lmIn)) +
-      "\n" +
-      tableRow("Abwasser", fmtL2(state.lmOut)) +
-      "\n" +
-      tableRow("Produktwasser", fmtL2(state.lmDrink)) +
-      "\n" +
-      tableRow("Ausbeute", fmtPct2(monthEff)) +
-      "\n" +
-      tableRow("Energie", fmtKwh2(state.lmEnergy)) +
-      "\n" +
-      codeFence;
-  }
-
-  if (state.remoteOffline) {
-    txt +=
-      "\n\n" +
-      "⚠️ *Hinweis*\n" +
-      "Ablauf-Shelly ist derzeit nicht erreichbar.\n" +
-      "Der Ablaufwert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
-  }
-  if (state.plugOffline) {
-    txt +=
-      "\n\n" +
-      "⚠️ *Hinweis*\n" +
-      "Shelly Plug ist derzeit nicht erreichbar.\n" +
-      "Der Energiewert wird temporaer mit dem letzten gueltigen Stand fortgeschrieben.";
-  }
-
+  txt += buildReportWarnings();
   return txt;
+}
+
+function buildWeeklyReport(now) {
+  let weekEff = state.lwIn > 0 ? (state.lwDrink / state.lwIn) * 100.0 : 0.0;
+  let codeFence = "```";
+  return (
+    "📆 *Osmose Wochenreport*\n" +
+    "🕒 Erstellt: " +
+    dayKeyNow(now) +
+    " " +
+    todayHm(now) +
+    "\n\n" +
+    "📆 *Letzte Woche* (" +
+    state.lwKey +
+    ")\n" +
+    codeFence +
+    "\n" +
+    tableRow("Zulauf", fmtL2(state.lwIn)) +
+    "\n" +
+    tableRow("Abwasser", fmtL2(state.lwOut)) +
+    "\n" +
+    tableRow("Produktwasser", fmtL2(state.lwDrink)) +
+    "\n" +
+    tableRow("Ausbeute", fmtPct2(weekEff)) +
+    "\n" +
+    tableRow("Energie", fmtKwh2(state.lwEnergy)) +
+    "\n" +
+    codeFence +
+    buildReportWarnings()
+  );
+}
+
+function buildMonthlyReport(now) {
+  let monthEff = state.lmIn > 0 ? (state.lmDrink / state.lmIn) * 100.0 : 0.0;
+  let codeFence = "```";
+  return (
+    "🗓️ *Osmose Monatsreport*\n" +
+    "🕒 Erstellt: " +
+    dayKeyNow(now) +
+    " " +
+    todayHm(now) +
+    "\n\n" +
+    "🗓️ *Letzter Monat* (" +
+    state.lmKey +
+    ")\n" +
+    codeFence +
+    "\n" +
+    tableRow("Zulauf", fmtL2(state.lmIn)) +
+    "\n" +
+    tableRow("Abwasser", fmtL2(state.lmOut)) +
+    "\n" +
+    tableRow("Produktwasser", fmtL2(state.lmDrink)) +
+    "\n" +
+    tableRow("Ausbeute", fmtPct2(monthEff)) +
+    "\n" +
+    tableRow("Energie", fmtKwh2(state.lmEnergy)) +
+    "\n" +
+    codeFence +
+    buildReportWarnings()
+  );
+}
+
+function buildScheduledReport(now) {
+  return buildDailyReport(now);
+}
+
+function buildPendingReport(kind, now) {
+  if (kind === "daily") return buildDailyReport(now);
+  if (kind === "weekly") return buildWeeklyReport(now);
+  if (kind === "monthly") return buildMonthlyReport(now);
+  return "";
 }
 
 function buildTestReport(now) {
@@ -990,29 +1026,60 @@ function maybeQueueDaily(now) {
   if (now.getHours() !== CFG.dailySendHour) return;
   if (state.lastReportDay === dKey) return; // heute schon gesendet
   if (!state.yKey) return; // noch kein Vortag vorhanden
-  if (state.pendingText || state.pendingChart) return;
+  if (
+    state.pendingDailyText ||
+    state.pendingDailyChart ||
+    state.pendingWeeklyText ||
+    state.pendingMonthlyText
+  ) return;
 
   state.pendingReportDay = dKey;
   state.pendingReportKey = state.yKey;
-  state.pendingText = true;
-  state.pendingChart = true;
+  state.pendingDailyText = true;
+  state.pendingDailyChart = true;
+  if (now.getDay() === 1 && !!state.lwKey) state.pendingWeeklyText = true;
+  if (now.getDate() === 1 && !!state.lmKey) state.pendingMonthlyText = true;
 }
 
 function processPendingReports(now) {
-  if (state.pendingText) {
-    let text = buildScheduledReport(now);
+  if (state.pendingDailyText) {
+    let text = buildPendingReport("daily", now);
     sendWaReport(text, 1);
     text = "";
-    state.pendingText = false;
+    state.pendingDailyText = false;
     state.lastReportDay = state.pendingReportDay;
     return;
   }
 
-  if (state.pendingChart) {
+  if (state.pendingDailyChart) {
     let chartUrl = buildSparkUrl(state.yHourly, state.yEnergySlots, state.pendingReportKey);
     sendWaChart(chartUrl, "📊 Produktwasser + Energie " + state.pendingReportKey, 1);
     chartUrl = "";
-    state.pendingChart = false;
+    state.pendingDailyChart = false;
+    if (!state.pendingWeeklyText && !state.pendingMonthlyText) {
+      state.pendingReportDay = "";
+      state.pendingReportKey = "";
+    }
+    return;
+  }
+
+  if (state.pendingWeeklyText) {
+    let text = buildPendingReport("weekly", now);
+    sendWaReport(text, 1);
+    text = "";
+    state.pendingWeeklyText = false;
+    if (!state.pendingMonthlyText) {
+      state.pendingReportDay = "";
+      state.pendingReportKey = "";
+    }
+    return;
+  }
+
+  if (state.pendingMonthlyText) {
+    let text = buildPendingReport("monthly", now);
+    sendWaReport(text, 1);
+    text = "";
+    state.pendingMonthlyText = false;
     state.pendingReportDay = "";
     state.pendingReportKey = "";
   }
