@@ -92,6 +92,12 @@ let state = {
   todayEnergySlots: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
   yEnergySlots:     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
 
+  // Daily report queue: text first, chart on next tick
+  pendingReportDay: "",
+  pendingReportKey: "",
+  pendingText: false,
+  pendingChart: false,
+
   initialized: false,
 };
 
@@ -360,6 +366,12 @@ function saveState(cb) {
   });
   let s8 = JSON.stringify(state.todayEnergySlots);
   let s9 = JSON.stringify(state.yEnergySlots);
+  let s10 = JSON.stringify({
+    prd: state.pendingReportDay,
+    prk: state.pendingReportKey,
+    prt: state.pendingText ? 1 : 0,
+    prc: state.pendingChart ? 1 : 0,
+  });
 
   kvsSet("osm.s1", s1, function () {
     kvsSet("osm.s2", s2, function () {
@@ -369,7 +381,9 @@ function saveState(cb) {
             kvsSet("osm.s6", s6, function () {
               kvsSet("osm.s7", s7, function () {
                 kvsSet("osm.s8", s8, function () {
-                  kvsSet("osm.s9", s9, cb);
+                  kvsSet("osm.s9", s9, function () {
+                    kvsSet("osm.s10", s10, cb);
+                  });
                 });
               });
             });
@@ -399,76 +413,83 @@ function loadState(cb) {
               kvsGet("osm.s7", function (v7) {
                 kvsGet("osm.s8", function (v8) {
                   kvsGet("osm.s9", function (v9) {
-                    let o1 = parseJsonOrEmpty(v1);
-                    let o2 = parseJsonOrEmpty(v2);
-                    let o3 = parseJsonOrEmpty(v3);
-                    let o4 = parseJsonOrEmpty(v4);
-                    let o7 = parseJsonOrEmpty(v7);
+                    kvsGet("osm.s10", function (v10) {
+                      let o1 = parseJsonOrEmpty(v1);
+                      let o2 = parseJsonOrEmpty(v2);
+                      let o3 = parseJsonOrEmpty(v3);
+                      let o4 = parseJsonOrEmpty(v4);
+                      let o7 = parseJsonOrEmpty(v7);
+                      let o10 = parseJsonOrEmpty(v10);
 
-                    state.inTotal = o1.i || 0;
-                    state.outTotal = o1.o || 0;
-                    state.drinkTotal = o1.t || 0;
-                    state.lastIn = o1.li || 0;
-                    state.lastOut = o1.lo || 0;
+                      state.inTotal = o1.i || 0;
+                      state.outTotal = o1.o || 0;
+                      state.drinkTotal = o1.t || 0;
+                      state.lastIn = o1.li || 0;
+                      state.lastOut = o1.lo || 0;
 
-                    state.dayKey = o2.dk || "";
-                    state.dayInStart = o2.dis || 0;
-                    state.dayOutStart = o2.dos || 0;
-                    state.weekKey = o2.wk || "";
-                    state.weekInStart = o2.wis || 0;
-                    state.weekOutStart = o2.wos || 0;
-                    state.monthKey = o2.mk || "";
-                    state.monthInStart = o2.mis || 0;
-                    state.monthOutStart = o2.mos || 0;
+                      state.dayKey = o2.dk || "";
+                      state.dayInStart = o2.dis || 0;
+                      state.dayOutStart = o2.dos || 0;
+                      state.weekKey = o2.wk || "";
+                      state.weekInStart = o2.wis || 0;
+                      state.weekOutStart = o2.wos || 0;
+                      state.monthKey = o2.mk || "";
+                      state.monthInStart = o2.mis || 0;
+                      state.monthOutStart = o2.mos || 0;
 
-                    state.yIn = o3.yi || 0;
-                    state.yOut = o3.yo || 0;
-                    state.yDrink = o3.yt || 0;
-                    state.yKey = o3.yk || "";
-                    state.lastReportDay = o3.lrd || "";
-                    state.remoteFailCount = o3.rfc || 0;
-                    state.remoteOffline = (o3.rof || 0) === 1;
+                      state.yIn = o3.yi || 0;
+                      state.yOut = o3.yo || 0;
+                      state.yDrink = o3.yt || 0;
+                      state.yKey = o3.yk || "";
+                      state.lastReportDay = o3.lrd || "";
+                      state.remoteFailCount = o3.rfc || 0;
+                      state.remoteOffline = (o3.rof || 0) === 1;
 
-                    state.lwIn = o4.lwi || 0;
-                    state.lwOut = o4.lwo || 0;
-                    state.lwDrink = o4.lwt || 0;
-                    state.lwKey = o4.lwk || "";
-                    state.lmIn = o4.lmi || 0;
-                    state.lmOut = o4.lmo || 0;
-                    state.lmDrink = o4.lmt || 0;
-                    state.lmKey = o4.lmk || "";
+                      state.lwIn = o4.lwi || 0;
+                      state.lwOut = o4.lwo || 0;
+                      state.lwDrink = o4.lwt || 0;
+                      state.lwKey = o4.lwk || "";
+                      state.lmIn = o4.lmi || 0;
+                      state.lmOut = o4.lmo || 0;
+                      state.lmDrink = o4.lmt || 0;
+                      state.lmKey = o4.lmk || "";
 
-                    state.energyTotal = o7.e || 0;
-                    state.lastEnergy = o7.le || 0;
-                    state.dayEnergyStart = o7.des || 0;
-                    state.weekEnergyStart = o7.wes || 0;
-                    state.monthEnergyStart = o7.mes || 0;
-                    state.yEnergy = o7.ye || 0;
-                    state.lwEnergy = o7.lwe || 0;
-                    state.lmEnergy = o7.lme || 0;
-                    state.plugFailCount = o7.pfc || 0;
-                    state.plugOffline = (o7.pof || 0) === 1;
+                      state.energyTotal = o7.e || 0;
+                      state.lastEnergy = o7.le || 0;
+                      state.dayEnergyStart = o7.des || 0;
+                      state.weekEnergyStart = o7.wes || 0;
+                      state.monthEnergyStart = o7.mes || 0;
+                      state.yEnergy = o7.ye || 0;
+                      state.lwEnergy = o7.lwe || 0;
+                      state.lmEnergy = o7.lme || 0;
+                      state.plugFailCount = o7.pfc || 0;
+                      state.plugOffline = (o7.pof || 0) === 1;
+                      state.pendingReportDay = o10.prd || "";
+                      state.pendingReportKey = o10.prk || "";
+                      state.pendingText = (o10.prt || 0) === 1;
+                      state.pendingChart = (o10.prc || 0) === 1;
 
-                    let defWater = zero48Array();
-                    let defEnergy = zero48Array();
-                    try {
-                      let a5 = JSON.parse(v5);
-                      state.todayHourly = (a5 && a5.length === 48) ? a5 : zero48Array();
-                    } catch (e) { state.todayHourly = defWater; }
-                    try {
-                      let a6 = JSON.parse(v6);
-                      state.yHourly = (a6 && a6.length === 48) ? a6 : zero48Array();
-                    } catch (e) { state.yHourly = zero48Array(); }
-                    try {
-                      let a8 = JSON.parse(v8);
-                      state.todayEnergySlots = (a8 && a8.length === 48) ? a8 : defEnergy;
-                    } catch (e) { state.todayEnergySlots = zero48Array(); }
-                    try {
-                      let a9 = JSON.parse(v9);
-                      state.yEnergySlots = (a9 && a9.length === 48) ? a9 : zero48Array();
-                    } catch (e) { state.yEnergySlots = zero48Array(); }
+                      let defWater = zero48Array();
+                      let defEnergy = zero48Array();
+                      try {
+                        let a5 = JSON.parse(v5);
+                        state.todayHourly = (a5 && a5.length === 48) ? a5 : zero48Array();
+                      } catch (e) { state.todayHourly = defWater; }
+                      try {
+                        let a6 = JSON.parse(v6);
+                        state.yHourly = (a6 && a6.length === 48) ? a6 : zero48Array();
+                      } catch (e) { state.yHourly = zero48Array(); }
+                      try {
+                        let a8 = JSON.parse(v8);
+                        state.todayEnergySlots = (a8 && a8.length === 48) ? a8 : defEnergy;
+                      } catch (e) { state.todayEnergySlots = zero48Array(); }
+                      try {
+                        let a9 = JSON.parse(v9);
+                        state.yEnergySlots = (a9 && a9.length === 48) ? a9 : zero48Array();
+                      } catch (e) { state.yEnergySlots = zero48Array(); }
 
-                    cb();
+                      cb();
+                    });
                   });
                 });
               });
@@ -964,28 +985,37 @@ function sendWaChart(chartUrl, caption, attempt) {
   );
 }
 
-function maybeSendDaily(now) {
+function maybeQueueDaily(now) {
   let dKey = dayKeyNow(now);
   if (now.getHours() !== CFG.dailySendHour) return;
   if (state.lastReportDay === dKey) return; // heute schon gesendet
   if (!state.yKey) return; // noch kein Vortag vorhanden
+  if (state.pendingText || state.pendingChart) return;
 
-  // De-dupe sofort setzen; Versand wird verzögert gestartet, um RAM-Peaks zu glätten.
-  state.lastReportDay = dKey;
-  let reportKey = state.yKey;
+  state.pendingReportDay = dKey;
+  state.pendingReportKey = state.yKey;
+  state.pendingText = true;
+  state.pendingChart = true;
+}
 
-  Timer.set(CFG.dailyReportStartDelaySec * 1000, false, function () {
-    let chartUrl = buildSparkUrl(state.yHourly, state.yEnergySlots, reportKey);
-    sendWaChart(chartUrl, "📊 Produktwasser + Energie " + reportKey, 1);
+function processPendingReports(now) {
+  if (state.pendingText) {
+    let text = buildScheduledReport(now);
+    sendWaReport(text, 1);
+    text = "";
+    state.pendingText = false;
+    state.lastReportDay = state.pendingReportDay;
+    return;
+  }
+
+  if (state.pendingChart) {
+    let chartUrl = buildSparkUrl(state.yHourly, state.yEnergySlots, state.pendingReportKey);
+    sendWaChart(chartUrl, "📊 Produktwasser + Energie " + state.pendingReportKey, 1);
     chartUrl = "";
-
-    // Text erst NACH dem Chart bauen/senden (senkt Speicher-Spitze)
-    Timer.set(CFG.dailyReportTextDelaySec * 1000, false, function () {
-      let text = buildScheduledReport(new Date());
-      sendWaReport(text, 1);
-      text = "";
-    });
-  });
+    state.pendingChart = false;
+    state.pendingReportDay = "";
+    state.pendingReportKey = "";
+  }
 }
 
 function doTick(doneCb) {
@@ -1029,7 +1059,8 @@ function doTick(doneCb) {
           }
         }
 
-        maybeSendDaily(now);
+        maybeQueueDaily(now);
+        processPendingReports(now);
 
         state.lastIn = state.inTotal;
         state.lastOut = state.outTotal;
